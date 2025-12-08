@@ -4,54 +4,58 @@ import cv2
 
 def construct_log_gabor_filters(rows, cols, n_scales, n_orientations,
                                 min_wavelength, mult, sigma_on_f, d_theta_on_sigma):
-    u_range = np.fft.fftshift(np.fft.fftfreq(cols))
-    v_range = np.fft.fftshift(np.fft.fftfreq(rows))
+    dtype = np.float64
+
+    u_range = np.fft.fftshift(np.fft.fftfreq(cols)).astype(dtype)
+    v_range = np.fft.fftshift(np.fft.fftfreq(rows)).astype(dtype)
 
     x, y = np.meshgrid(u_range, v_range)
 
     radius = np.sqrt(x**2 + y**2)
     theta = np.arctan2(-y, x)
 
-    radius[rows//2, cols//2] = 1
+    radius[rows//2, cols//2] = 1.0
 
     sintheta = np.sin(theta)
     costheta = np.cos(theta)
 
-    filters = []
-
-    wavelengths = [min_wavelength * (mult ** i) for i in range(n_scales)]
-    center_freqs = [1.0 / w for w in wavelengths]
-
     theta_interval = np.pi / n_orientations
     theta_sigma = theta_interval / d_theta_on_sigma
 
-    for o in range(n_orientations):
-        angl = o * theta_interval
+    angles = (np.arange(n_orientations) * theta_interval).reshape(-1, 1, 1)
 
-        ds = sintheta * np.cos(angl) - costheta * np.sin(angl)
-        dc = costheta * np.cos(angl) + sintheta * np.sin(angl)
-        dtheta = np.abs(np.arctan2(ds, dc))
-        spread = np.exp((-dtheta**2) / (2 * theta_sigma**2))
+    st = sintheta[None, :, :]
+    ct = costheta[None, :, :]
 
-        scale_filters = []
-        for s in range(n_scales):
-            fo = center_freqs[s]
-            log_gabor = np.exp((-(np.log(radius/fo))**2) /
-                               (2 * np.log(sigma_on_f)**2))
+    cos_angles = np.cos(angles)
+    sin_angles = np.sin(angles)
 
-            log_gabor[rows//2, cols//2] = 0
+    ds = st * cos_angles - ct * sin_angles
+    dc = ct * cos_angles + st * sin_angles
 
-            filt = log_gabor * spread
-            scale_filters.append(filt)
+    dtheta = np.abs(np.arctan2(ds, dc))
+    spread = np.exp((-dtheta**2) / (2 * theta_sigma**2))
 
-        filters.append(scale_filters)
+    wavelengths = min_wavelength * (mult ** np.arange(n_scales, dtype=dtype))
+    center_freqs = 1.0 / wavelengths
 
-    return np.array(filters), wavelengths
+    fo = center_freqs.reshape(-1, 1, 1)
+
+    log_radius = np.log(radius)[None, :, :]
+    log_fo = np.log(fo)
+
+    log_gabor = np.exp((-(log_radius - log_fo)**2) /
+                       (2 * np.log(sigma_on_f)**2))
+
+    log_gabor[:, rows//2, cols//2] = 0.0
+
+    filters = spread[:, None, :, :] * log_gabor[None, :, :, :]
+
+    return filters
 
 
 def phase_congruency(image, n_scales=4, n_orientations=6, min_wavelength=3, mult=2.0,
                      sigma_on_f=0.55, k=2.0, cut_off=0.4, g=10, epsilon=0.001):
-    # 1. Pre-processing
     if len(image.shape) == 3:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
@@ -60,101 +64,74 @@ def phase_congruency(image, n_scales=4, n_orientations=6, min_wavelength=3, mult
 
     image_fft = np.fft.fft2(img)
 
-    # 2. Construct Filters
     d_theta_on_sigma = 1.2
-    filters, _ = construct_log_gabor_filters(rows, cols, n_scales, n_orientations,
-                                             min_wavelength, mult, sigma_on_f, d_theta_on_sigma)
+    filters = construct_log_gabor_filters(rows, cols, n_scales, n_orientations,
+                                          min_wavelength, mult, sigma_on_f, d_theta_on_sigma)
 
-    total_energy_result = np.zeros((rows, cols))
-    total_amplitude_sum = np.zeros((rows, cols))
+    filters_shifted = np.fft.ifftshift(filters, axes=(-2, -1))
 
-    # 3. Process Orientations
-    for o in range(n_orientations):
-        sum_real = np.zeros((rows, cols))
-        sum_imag = np.zeros((rows, cols))
-        sum_amp_o = np.zeros((rows, cols))
+    response_fft = image_fft[None, None, :, :] * filters_shifted
 
-        max_amp_o = np.zeros((rows, cols))
+    response_spatial = np.fft.ifft2(response_fft)
 
-        scale_amps = []
-        scale_reals = []
-        scale_imags = []
+    real = np.real(response_spatial)
+    imag = np.imag(response_spatial)
+    amp = np.sqrt(real**2 + imag**2)
 
-        filter_power_0 = 0
-        median_response = 0
+    sum_real = np.sum(real, axis=1)
+    sum_imag = np.sum(imag, axis=1)
+    sum_amp = np.sum(amp, axis=1)
 
-        # 4. Process Scales
-        for s in range(n_scales):
-            filt = filters[o, s]
+    max_amp = np.max(amp, axis=1)
 
-            filt_shifted = np.fft.ifftshift(filt)
+    median_response = np.median(amp[:, 0]**2, axis=(1, 2))
 
-            response_fft = image_fft * filt_shifted
-            response_spatial = np.fft.ifft2(response_fft)
+    filter_power_0 = np.sum(filters[:, 0]**2, axis=(1, 2))
 
-            real = np.real(response_spatial)
-            imag = np.imag(response_spatial)
-            amp = np.sqrt(real**2 + imag**2)
+    sum_filter_powers = np.sum(filters**2, axis=(1, 2, 3))
 
-            scale_amps.append(amp)
-            scale_reals.append(real)
-            scale_imags.append(imag)
+    expected_energy_sq_total = np.zeros_like(median_response)
+    valid_power = filter_power_0 > 0
 
-            sum_real += real
-            sum_imag += imag
-            sum_amp_o += amp
+    if np.any(valid_power):
+        expected_energy_sq_0 = -median_response[valid_power] / np.log(0.5)
+        power_ratio = sum_filter_powers[valid_power] / \
+            filter_power_0[valid_power]
+        expected_energy_sq_total[valid_power] = expected_energy_sq_0 * power_ratio
 
-            max_amp_o = np.maximum(max_amp_o, amp)
+    sigma_g_sq = expected_energy_sq_total / 2.0
+    sigma_r = np.sqrt((4 - np.pi) / 2.0 * sigma_g_sq)
+    mu_r = np.sqrt(sigma_g_sq * np.pi / 2.0)
 
-            if s == 0:
-                median_response = np.median(amp**2)
-                filter_power_0 = np.sum(filt**2)
+    T = mu_r + k * sigma_r
 
-        # 5. Noise Compensation
-        if filter_power_0 == 0:
-            expected_energy_sq_total = 0
-        else:
-            expected_energy_sq_0 = -median_response / np.log(0.5)
-            sum_filter_powers = np.sum(
-                [np.sum(filters[o, s]**2) for s in range(n_scales)])
-            power_ratio = sum_filter_powers / filter_power_0
-            expected_energy_sq_total = expected_energy_sq_0 * power_ratio
+    T = T[:, None, None]
 
-        sigma_g_sq = expected_energy_sq_total / 2.0
-        mu_r = np.sqrt(sigma_g_sq * np.pi / 2.0)
-        sigma_r_sq = (4 - np.pi) / 2.0 * sigma_g_sq
-        sigma_r = np.sqrt(sigma_r_sq)
+    energy_vector_mag = np.sqrt(sum_real**2 + sum_imag**2) + epsilon
+    mean_phase_unit_real = sum_real / energy_vector_mag
+    mean_phase_unit_imag = sum_imag / energy_vector_mag
 
-        T = mu_r + k * sigma_r
+    mpu_real = mean_phase_unit_real[:, None, :, :]
+    mpu_imag = mean_phase_unit_imag[:, None, :, :]
 
-        # 6. Calculate Phase Deviation and Weighting
-        energy_vector_mag = np.sqrt(sum_real**2 + sum_imag**2) + epsilon
-        mean_phase_unit_real = sum_real / energy_vector_mag
-        mean_phase_unit_imag = sum_imag / energy_vector_mag
+    dot_prod = real * mpu_real + imag * mpu_imag
+    cross_prod = real * mpu_imag - imag * mpu_real
 
-        phase_dev_sum = np.zeros((rows, cols))
+    phase_dev = dot_prod - np.abs(cross_prod)
 
-        for s in range(n_scales):
-            dot_prod = scale_reals[s] * mean_phase_unit_real + \
-                scale_imags[s] * mean_phase_unit_imag
-            cross_prod = scale_reals[s] * mean_phase_unit_imag - \
-                scale_imags[s] * mean_phase_unit_real
+    phase_dev_sum = np.sum(phase_dev, axis=1)
 
-            phase_dev_sum += (dot_prod - np.abs(cross_prod))
+    energy_o = np.maximum(phase_dev_sum - T, 0)
 
-        energy_o = np.maximum(phase_dev_sum - T, 0)
+    width = (sum_amp / (max_amp + epsilon)) / n_scales
+    weight_o = 1.0 / (1.0 + np.exp(g * (cut_off - width)))
 
-        width = (sum_amp_o / (max_amp_o + epsilon)) / n_scales
+    weighted_energy_o = weight_o * energy_o
 
-        weight_o = 1.0 / (1.0 + np.exp(g * (cut_off - width)))
+    total_energy_result = np.sum(weighted_energy_o, axis=0)
+    total_amplitude_sum = np.sum(sum_amp, axis=0)
 
-        total_energy_result += (weight_o * energy_o)
-
-        total_amplitude_sum += sum_amp_o
-
-    # 7. Final Calculation
     PC = total_energy_result / (total_amplitude_sum + epsilon)
-
     PC = np.clip(PC, 0, 1)
 
     return PC

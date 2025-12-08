@@ -3,7 +3,7 @@ import numpy as np
 from .root_sift import extract_rootsift
 from .lp_sift import lp_sift_detect_and_compute
 from .daisy import daisy_at_point
-from .phog import compute_local_phog
+from .phog import build_integral_histogram, extract_batch_phog
 from .phase_congruency import phase_congruency, compute_sift_dominant_orientation
 
 
@@ -27,6 +27,20 @@ def extract_sift_daisy_features(image):
     if kps is None or len(kps) == 0:
         return [], None
 
+    daisy = cv2.xfeatures2d.DAISY_create(
+        radius=15,
+        q_radius=3,
+        q_theta=8,
+        q_hist=8,
+        norm=cv2.xfeatures2d.DAISY_NRM_PARTIAL
+    )
+    kps_cv, descs_cv = daisy.compute(image, kps)
+
+    if descs_cv is not None and len(descs_cv) > 0:
+        return list(kps_cv), descs_cv
+    else:
+        return [], None
+    '''
     valid_kps = []
     descriptors = []
 
@@ -43,6 +57,7 @@ def extract_sift_daisy_features(image):
 
     descs = np.array(descriptors, dtype=np.float32)
     return valid_kps, descs
+    '''
 
 
 def extract_sift_phog_features(image, patch_size=64):
@@ -52,8 +67,9 @@ def extract_sift_phog_features(image, patch_size=64):
     if kps is None or len(kps) == 0:
         return [], None
 
-    valid_kps = []
-    descriptors = []
+    n_bins = 20
+    angle = 180
+    L = 3
 
     half_size = patch_size // 2
     padded_image = cv2.copyMakeBorder(
@@ -61,30 +77,23 @@ def extract_sift_phog_features(image, patch_size=64):
         cv2.BORDER_CONSTANT, value=0
     )
 
-    for kp in kps:
-        x, y = int(round(kp.pt[0])), int(round(kp.pt[1]))
+    integral_H = build_integral_histogram(
+        padded_image, n_bins=n_bins, angle=angle)
 
-        padded_x = x + half_size
-        padded_y = y + half_size
+    pts = cv2.KeyPoint_convert(kps)
+    x = np.round(pts[:, 0]).astype(int)
+    y = np.round(pts[:, 1]).astype(int)
 
-        y_top = padded_y - half_size
-        y_bottom = padded_y + half_size
-        x_left = padded_x - half_size
-        x_right = padded_x + half_size
+    N = len(kps)
+    rects = np.zeros((N, 4), dtype=int)
+    rects[:, 0] = x
+    rects[:, 1] = y
+    rects[:, 2] = patch_size
+    rects[:, 3] = patch_size
 
-        patch = padded_image[y_top:y_bottom, x_left:x_right]
+    descriptors = extract_batch_phog(integral_H, rects, L=L, n_bins=n_bins)
 
-        descriptor = compute_local_phog(patch, n_bins=20, angle=180, L=3)
-
-        if descriptor is not None and descriptor.size > 0:
-            valid_kps.append(kp)
-            descriptors.append(descriptor.flatten())
-
-    if len(valid_kps) == 0:
-        return [], None
-
-    descs = np.array(descriptors, dtype=np.float32)
-    return valid_kps, descs
+    return list(kps), descriptors
 
 
 def extract_phase_congruency_sift_features(image):
@@ -96,11 +105,11 @@ def extract_phase_congruency_sift_features(image):
 
     local_max = (pc_map == dilated) & (pc_map > 0)
 
-    threshold = np.percentile(pc_map[local_max], 90) if np.any(local_max) else 0
+    threshold = np.percentile(
+        pc_map[local_max], 90) if np.any(local_max) else 0
     feature_points = np.argwhere((local_max) & (pc_map > threshold))
 
     if len(feature_points) == 0:
-        assert False
         return [], None
 
     kps = []
@@ -109,7 +118,8 @@ def extract_phase_congruency_sift_features(image):
 
         angle = compute_sift_dominant_orientation(image, x, y, size=size)
 
-        kp = cv2.KeyPoint(x=float(x), y=float(y), size=size, angle=float(angle))
+        kp = cv2.KeyPoint(x=float(x), y=float(
+            y), size=size, angle=float(angle))
         kps.append(kp)
 
     sift = cv2.SIFT_create()
