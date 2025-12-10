@@ -5,6 +5,39 @@ from .lp_sift import lp_sift_detect_and_compute
 from .daisy import daisy_at_point
 from .phog import build_integral_histogram, extract_batch_phog
 from .phase_congruency import phase_congruency, compute_sift_dominant_orientation
+from .infer_onnx import SuperPointONNX
+
+
+def extract_opencv_sift_features(image):
+    sift = cv2.SIFT_create()
+    kps, descs = sift.detectAndCompute(image, None)
+
+    if kps is None or len(kps) == 0:
+        return [], None
+
+    return kps, descs
+
+
+def extract_superpoint_features(image, model_path, conf_thresh=0.015, nms_dist=4):
+    model = SuperPointONNX(
+        model_path=model_path,
+        conf_thresh=conf_thresh,
+        nms_dist=nms_dist
+    )
+
+    keypoints, descriptors = model.detect(image)
+
+    return keypoints, descriptors
+
+
+def extract_opencv_orb_features(image):
+    orb = cv2.ORB_create(nfeatures=2000)
+    kps, descs = orb.detectAndCompute(image, None)
+
+    if kps is None or len(kps) == 0:
+        return [], None
+
+    return kps, descs
 
 
 def extract_rootsift_features(image):
